@@ -1,0 +1,8 @@
+{
+  "name": "Jago UI Clone",
+  "description": "A 100% pixel-perfect UI clone of the Bank Jago mobile app interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
