@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { onAuthStateChanged, User, signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { ref, onValue, set, get } from "firebase/database";
-import { auth, db, DB_URL } from "../lib/firebase";
+import { auth, db } from "../lib/firebase";
 
 export interface Transaction {
   id: string;
@@ -70,7 +70,7 @@ export function JagoProvider({ children }: { children: ReactNode }) {
 
     let isMounted = true;
 
-    // Helper to process transactions & calculate balance cleanly
+    // Helper to sync processed records & calculate balance using SDK only
     const syncData = async (allTransactionsObj: Record<string, Transaction> | null) => {
       if (!isMounted) return;
 
@@ -86,7 +86,7 @@ export function JagoProvider({ children }: { children: ReactNode }) {
       for (const [key, tx] of txEntries) {
         if (!tx || typeof tx !== "object") continue;
         
-        // Strictly validate required criteria according to requirements
+        // Filter transactions for this user from garuda_inves to jago
         if (
           tx.type === "withdraw" &&
           tx.source === "garuda_inves" &&
@@ -110,35 +110,32 @@ export function JagoProvider({ children }: { children: ReactNode }) {
         setTransactions(validTxs);
       }
 
-      // Process double-credit protection via REST or SDK safely
+      // Read processed transactions via SDK
       try {
-        // Fetch currently processed transactions for this userId
-        const processedRes = await fetch(`${DB_URL}/jago_processed_transactions/${userId}.json`);
+        const processedRef = ref(db, `jago_processed_transactions/${userId}`);
+        const snapshot = await get(processedRef);
         const processedData: Record<string, { amount: number; processedAt: number }> = 
-          processedRes.ok ? (await processedRes.json()) || {} : {};
+          snapshot.exists() ? snapshot.val() : {};
 
-        let newWritesNeeded = false;
         const updatedProcessed = { ...processedData };
 
         for (const tx of validTxs) {
           const txId = tx.transactionId;
           if (!updatedProcessed[txId]) {
-            updatedProcessed[txId] = {
+            const item = {
               amount: Number(tx.amount) || 0,
               processedAt: Date.now()
             };
-            newWritesNeeded = true;
+            updatedProcessed[txId] = item;
 
-            // Write to Firebase Realtime Database
-            await fetch(`${DB_URL}/jago_processed_transactions/${userId}/${txId}.json`, {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(updatedProcessed[txId])
-            }).catch((err) => console.error("Error marking processed transaction:", err));
+            // Save to Firebase RTDB via SDK
+            set(ref(db, `jago_processed_transactions/${userId}/${txId}`), item).catch((err) =>
+              console.error("Error setting processed tx:", err)
+            );
           }
         }
 
-        // Calculate total balance from uniquely processed transaction IDs
+        // Total up unique processed amounts
         let totalBalance = 0;
         for (const txId in updatedProcessed) {
           if (updatedProcessed[txId] && typeof updatedProcessed[txId].amount === "number") {
@@ -150,45 +147,29 @@ export function JagoProvider({ children }: { children: ReactNode }) {
           setBalance(totalBalance);
         }
       } catch (err) {
-        console.error("Error calculating processed balance:", err);
+        console.error("Error calculating balance via SDK:", err);
       }
     };
 
-    // Listen using Firebase SDK onValue as primary
-    let unsubscribeSDK: (() => void) | null = null;
-    try {
-      const txRef = ref(db, "transactions");
-      unsubscribeSDK = onValue(txRef, (snapshot) => {
+    // Realtime SDK listener
+    const txRef = ref(db, "transactions");
+    const unsubscribe = onValue(
+      txRef,
+      (snapshot) => {
         if (snapshot.exists()) {
           syncData(snapshot.val());
         } else {
           syncData(null);
         }
-      });
-    } catch (err) {
-      console.warn("Firebase SDK onValue fallback to REST API:", err);
-    }
-
-    // Interval fetch as guaranteed backup for continuous realtime sync
-    const fetchTxsREST = async () => {
-      try {
-        const res = await fetch(`${DB_URL}/transactions.json`);
-        if (res.ok) {
-          const data = await res.json();
-          await syncData(data);
-        }
-      } catch (e) {
-        console.error("REST fetch error:", e);
+      },
+      (error) => {
+        console.error("Realtime DB listener error:", error);
       }
-    };
-
-    fetchTxsREST();
-    const interval = setInterval(fetchTxsREST, 3000);
+    );
 
     return () => {
       isMounted = false;
-      if (unsubscribeSDK) unsubscribeSDK();
-      clearInterval(interval);
+      unsubscribe();
     };
   }, [userId]);
 
